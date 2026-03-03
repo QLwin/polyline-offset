@@ -5,8 +5,6 @@
 
 namespace polyline_offset {
 
-static constexpr double EPS = 1e-9;
-
 // ──────────────────────── helper geometry ─────────────────────────────
 
 std::optional<double> line_line_param(
@@ -241,9 +239,9 @@ static std::vector<std::vector<Vec2>> remove_self_intersections(
             // invalid side and we skip it; otherwise we keep it.
 
             // Compute a representative point inside the loop
-            int loopMidSeg = (seg + best->j) / 2 + 1;
+            int loopMidSeg = seg + (best->j - seg) / 2 + 1;
             if (loopMidSeg >= n) loopMidSeg = n - 1;
-            Vec2 loopMid = raw[std::min(loopMidSeg, n - 1)];
+            Vec2 loopMid = raw[loopMidSeg];
             double loopDist = point_polyline_dist(loopMid, original);
 
             bool skipForward = (loopDist < std::abs(offset) - EPS);
@@ -251,7 +249,7 @@ static std::vector<std::vector<Vec2>> remove_self_intersections(
             if (!skipForward) {
                 // Check a second sample
                 int loopSeg2 = seg + 1;
-                if (loopSeg2 < best->j) {
+                if (loopSeg2 < n && loopSeg2 < best->j) {
                     Vec2 sample2 = raw[loopSeg2];
                     double d2 = point_polyline_dist(sample2, original);
                     if (d2 < std::abs(offset) * 0.5)

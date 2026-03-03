@@ -7,6 +7,9 @@
 
 namespace polyline_offset {
 
+/// Tolerance used for floating-point comparisons.
+constexpr double EPS = 1e-9;
+
 // ───────────────────────────── 2-D vector ─────────────────────────────
 struct Vec2 {
     double x = 0, y = 0;
@@ -18,7 +21,7 @@ struct Vec2 {
     Vec2 operator-(const Vec2& o) const { return {x - o.x, y - o.y}; }
     Vec2 operator*(double s)      const { return {x * s, y * s}; }
     bool operator==(const Vec2& o) const {
-        return std::abs(x - o.x) < 1e-9 && std::abs(y - o.y) < 1e-9;
+        return std::abs(x - o.x) < EPS && std::abs(y - o.y) < EPS;
     }
 
     double dot  (const Vec2& o) const { return x * o.x + y * o.y; }
