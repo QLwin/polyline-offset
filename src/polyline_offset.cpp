@@ -240,19 +240,23 @@ static std::vector<std::vector<Vec2>> remove_self_intersections(
 
             // Compute a representative point inside the loop
             int loopMidSeg = seg + (best->j - seg) / 2 + 1;
-            if (loopMidSeg >= n) loopMidSeg = n - 1;
+            if (loopMidSeg >= n - 1) loopMidSeg = n - 2;
+            if (loopMidSeg < 0)      loopMidSeg = 0;
             Vec2 loopMid = raw[loopMidSeg];
             double loopDist = point_polyline_dist(loopMid, original);
 
             bool skipForward = (loopDist < std::abs(offset) - EPS);
-            // Also skip if the loop is extremely small (degenerate)
+            // Also skip if the loop is extremely small (degenerate).
+            // The 0.5 factor is a heuristic: if the loop sample is closer
+            // than half the expected offset distance, the loop is invalid.
+            constexpr double kLoopDistThreshold = 0.5;
             if (!skipForward) {
                 // Check a second sample
                 int loopSeg2 = seg + 1;
                 if (loopSeg2 < n && loopSeg2 < best->j) {
                     Vec2 sample2 = raw[loopSeg2];
                     double d2 = point_polyline_dist(sample2, original);
-                    if (d2 < std::abs(offset) * 0.5)
+                    if (d2 < std::abs(offset) * kLoopDistThreshold)
                         skipForward = true;
                 }
             }
