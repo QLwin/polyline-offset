@@ -1,2 +1,0 @@
-/usr/bin/ar qc libpolyline_offset.a CMakeFiles/polyline_offset.dir/src/polyline_offset.cpp.o
-/usr/bin/ranlib libpolyline_offset.a
