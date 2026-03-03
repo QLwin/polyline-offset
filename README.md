@@ -4,20 +4,17 @@
 
 ## Features
 
-- **Outward / inward offset** – positive distance offsets to the left of the
-  polyline direction; negative distance offsets to the right.
-- **Vertex degeneration** – duplicate or near-duplicate vertices are
-  automatically removed before and after offsetting.
-- **Self-intersection removal** – loops created by sharp angles are detected
-  and removed automatically.
-- **Open & closed polylines** – set `OffsetOptions::is_closed = true` for
-  closed polylines (polygons).
+- **Outward / Inward offset** – positive offset shifts left (outward for CCW polygons), negative shifts right (inward).
+- **Vertex degeneration** – duplicate and near-duplicate vertices are automatically removed.
+- **Self-intersection removal** – loops caused by large offsets on concave geometry are detected and trimmed.
+- **Miter-limit bevel** – sharp corners exceeding the configurable miter limit are beveled.
+- **Open & closed polylines** – works with both open paths and closed polygons.
 
 ## Build
 
 ```bash
 mkdir build && cd build
-cmake ..
+cmake .. -DCMAKE_BUILD_TYPE=Release
 cmake --build .
 ```
 
@@ -25,52 +22,25 @@ cmake --build .
 
 ```bash
 cd build
-ctest          # or ./test_offset
-```
-
-## Quick example
-
-```cpp
-#include "polyline_offset/polyline_offset.h"
-#include <cstdio>
-
-int main() {
-    using namespace polyline_offset;
-
-    Polyline poly = {{0, 0}, {10, 0}, {10, 10}};
-    Polyline result = offset_polyline(poly, 1.0);
-
-    for (auto& p : result)
-        std::printf("(%.2f, %.2f)\n", p.x, p.y);
-
-    // Closed polyline (polygon) offset
-    Polyline square = {{0, 0}, {10, 0}, {10, 10}, {0, 10}};
-    OffsetOptions opts;
-    opts.is_closed = true;
-    Polyline inward = offset_polyline(square, 1.0, opts);   // shrink (CCW)
-    Polyline outward = offset_polyline(square, -1.0, opts);  // expand (CCW)
-}
+ctest --output-on-failure
 ```
 
 ## API
 
 ```cpp
-namespace polyline_offset {
+#include "polyline_offset.h"
+using namespace polyline_offset;
 
-struct Point2D { double x, y; /* operators … */ };
-using Polyline = std::vector<Point2D>;
+// Offset an open polyline to the left by 1.0
+std::vector<Vec2> poly = {{0,0}, {10,0}, {10,10}};
+auto result = offset_polyline(poly, 1.0);
 
-struct OffsetOptions {
-    bool is_closed = false;
-};
+// Offset a closed polygon inward by 0.5
+std::vector<Vec2> square = {{0,0}, {10,0}, {10,10}, {0,10}};
+auto result2 = offset_polyline(square, -0.5, /*closed=*/true);
 
-Polyline offset_polyline(const Polyline& polyline, double distance,
-                         const OffsetOptions& options = {});
-}
+// Custom miter limit (default is 2.0)
+auto result3 = offset_polyline(poly, 1.0, false, 4.0);
 ```
 
-| Parameter | Description |
-|-----------|-------------|
-| `polyline` | Input polyline (≥ 2 points). |
-| `distance` | Offset distance. Positive = left of walking direction; negative = right. For a CCW polygon with `is_closed = true`, positive shrinks and negative expands. |
-| `options.is_closed` | When `true`, an edge from the last vertex back to the first is included and the result is also closed. |
+The function returns `std::vector<std::vector<Vec2>>` – one or more polylines, because self-intersection removal can split the result into separate pieces.

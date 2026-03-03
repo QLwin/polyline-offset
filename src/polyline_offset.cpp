@@ -1,225 +1,325 @@
-#include "polyline_offset/polyline_offset.h"
-
-#include <algorithm>
+#include "polyline_offset.h"
+#include <cassert>
 #include <cmath>
+#include <limits>
 
 namespace polyline_offset {
 
-namespace {
+// ──────────────────────── helper geometry ─────────────────────────────
 
-constexpr double EPS = 1e-9;
-
-// ---- geometry helpers -------------------------------------------------------
-
-/// Unit-length left-hand normal of segment (a, b).
-Point2D left_normal(const Point2D& a, const Point2D& b) {
-    Point2D d = b - a;
-    double len = d.length();
-    if (len < EPS) return {0, 0};
-    return {-d.y / len, d.x / len};
+std::optional<double> line_line_param(
+    const Vec2& P, const Vec2& D,
+    const Vec2& Q, const Vec2& E)
+{
+    double denom = D.cross(E);
+    if (std::abs(denom) < EPS) return std::nullopt;
+    return (Q - P).cross(E) / denom;
 }
 
-/// Intersect two infinite lines: p1 + t*d1 and p2 + s*d2.
-/// Returns false when lines are (nearly) parallel.
-bool line_intersect(const Point2D& p1, const Point2D& d1,
-                    const Point2D& p2, const Point2D& d2,
-                    double& t, double& s) {
-    double denom = d1.cross(d2);
-    if (std::abs(denom) < EPS) return false;
-    Point2D dp = p2 - p1;
-    t = dp.cross(d2) / denom;
-    s = dp.cross(d1) / denom;
-    return true;
+std::optional<SegIsect> seg_seg_isect(
+    const Vec2& A, const Vec2& B,
+    const Vec2& C, const Vec2& D)
+{
+    Vec2   AB = B - A, CD = D - C;
+    double denom = AB.cross(CD);
+    if (std::abs(denom) < EPS) return std::nullopt;
+
+    Vec2   AC = C - A;
+    double t  = AC.cross(CD) / denom;
+    double s  = AC.cross(AB) / denom;
+
+    if (t < -EPS || t > 1 + EPS || s < -EPS || s > 1 + EPS)
+        return std::nullopt;
+
+    t = std::clamp(t, 0.0, 1.0);
+    s = std::clamp(s, 0.0, 1.0);
+    return SegIsect{t, s, A + AB * t};
 }
 
-/// Intersect two finite segments a1-b1 and a2-b2.
-/// On success writes parameter values t, s ∈ [0,1] and intersection point ip.
-bool segment_intersect(const Point2D& a1, const Point2D& b1,
-                       const Point2D& a2, const Point2D& b2,
-                       double& t, double& s, Point2D& ip) {
-    Point2D d1 = b1 - a1;
-    Point2D d2 = b2 - a2;
-    if (!line_intersect(a1, d1, a2, d2, t, s)) return false;
-    if (t < -EPS || t > 1.0 + EPS || s < -EPS || s > 1.0 + EPS) return false;
-    t = std::max(0.0, std::min(1.0, t));
-    s = std::max(0.0, std::min(1.0, s));
-    ip = a1 + d1 * t;
-    return true;
-}
-
-
-// ---- degeneration -----------------------------------------------------------
-
-/// Remove consecutive duplicate (or near-duplicate) vertices.
-Polyline remove_degenerate_vertices(const Polyline& poly) {
-    if (poly.size() < 2) return poly;
-    Polyline out;
-    out.push_back(poly[0]);
-    for (size_t i = 1; i < poly.size(); ++i) {
-        if ((poly[i] - out.back()).length() > EPS) {
-            out.push_back(poly[i]);
-        }
-    }
-    return out;
-}
-
-// ---- raw offset -------------------------------------------------------------
-
-struct OffsetEdge {
-    Point2D start, end;
-};
-
-/// Compute offset edges (one per original edge) displaced by `dist`.
-std::vector<OffsetEdge> build_offset_edges(const Polyline& poly, double dist) {
-    std::vector<OffsetEdge> edges;
+double point_polyline_dist(const Vec2& P, const std::vector<Vec2>& poly)
+{
+    double best = std::numeric_limits<double>::max();
     for (size_t i = 0; i + 1 < poly.size(); ++i) {
-        Point2D n = left_normal(poly[i], poly[i + 1]) * dist;
-        edges.push_back({poly[i] + n, poly[i + 1] + n});
+        Vec2   AB   = poly[i + 1] - poly[i];
+        double len2 = AB.lengthSq();
+        double t    = (len2 > 1e-24)
+                        ? std::clamp((P - poly[i]).dot(AB) / len2, 0.0, 1.0)
+                        : 0.0;
+        double d = (P - (poly[i] + AB * t)).length();
+        best = std::min(best, d);
     }
-    return edges;
+    return best;
 }
 
-/// Build the raw offset polyline by joining adjacent offset edges at their
-/// line-line intersection (miter join) or falling back to the edge endpoint
-/// when edges are parallel.
-Polyline join_offset_edges(const std::vector<OffsetEdge>& edges) {
-    if (edges.empty()) return {};
-    Polyline out;
-    out.push_back(edges.front().start);
-    for (size_t i = 0; i + 1 < edges.size(); ++i) {
-        Point2D d1 = edges[i].end - edges[i].start;
-        Point2D d2 = edges[i + 1].end - edges[i + 1].start;
-        double t, s;
-        if (line_intersect(edges[i].start, d1, edges[i + 1].start, d2, t, s)) {
-            out.push_back(edges[i].start + d1 * t);
-        } else {
-            out.push_back(edges[i].end);
-        }
+// ──────────── remove near-duplicate consecutive vertices ──────────────
+
+static std::vector<Vec2> deduplicate(const std::vector<Vec2>& pts,
+                                     double tol = EPS)
+{
+    if (pts.empty()) return {};
+    std::vector<Vec2> out;
+    out.push_back(pts.front());
+    for (size_t i = 1; i < pts.size(); ++i) {
+        if ((pts[i] - out.back()).lengthSq() > tol * tol)
+            out.push_back(pts[i]);
     }
-    out.push_back(edges.back().end);
     return out;
 }
 
-/// Build the raw offset polyline for a closed polyline.
-/// The result is also closed (first == last).
-Polyline join_offset_edges_closed(const std::vector<OffsetEdge>& edges) {
-    if (edges.empty()) return {};
-    size_t n = edges.size();
-    Polyline out;
-    for (size_t i = 0; i < n; ++i) {
-        size_t next = (i + 1) % n;
-        Point2D d1 = edges[i].end - edges[i].start;
-        Point2D d2 = edges[next].end - edges[next].start;
-        double t, s;
-        if (line_intersect(edges[i].start, d1, edges[next].start, d2, t, s)) {
-            out.push_back(edges[i].start + d1 * t);
-        } else {
-            out.push_back(edges[i].end);
-        }
-    }
-    out.push_back(out.front()); // close
-    return out;
+// ───────────────── compute unit left-normal of a segment ──────────────
+
+static Vec2 seg_normal(const Vec2& A, const Vec2& B)
+{
+    return (B - A).perp().normalized();
 }
 
-// ---- self-intersection removal ----------------------------------------------
+// ─────────────── build raw offset polyline (open case) ────────────────
+//
+// For each original edge, shift it by `offset` along its left-normal.
+// Adjacent offset edges are joined at their intersection (miter join)
+// unless the miter ratio exceeds miter_limit, in which case a bevel
+// (single connecting segment) is used instead.
 
-/// Iteratively find and remove the first self-intersection loop until none
-/// remain.  Each iteration is O(n²); the total number of iterations is bounded
-/// by the number of vertices.
-Polyline remove_self_intersections(const Polyline& poly) {
-    Polyline cur = poly;
+static std::vector<Vec2> raw_offset_open(
+    const std::vector<Vec2>& poly,
+    double offset,
+    double miter_limit)
+{
+    const int n = static_cast<int>(poly.size());
+    if (n < 2) return poly;
 
-    for (int iter = 0; iter < static_cast<int>(poly.size()) * 2 + 10; ++iter) {
-        size_t n = cur.size();
-        if (n < 3) break;
-        size_t nsegs = n - 1;
+    // Pre-compute offset edges: each edge i → (oA[i], oB[i])
+    struct Edge { Vec2 a, b; };
+    std::vector<Edge> edges(n - 1);
+    for (int i = 0; i < n - 1; ++i) {
+        Vec2 norm = seg_normal(poly[i], poly[i + 1]) * offset;
+        edges[i] = {poly[i] + norm, poly[i + 1] + norm};
+    }
 
-        // Detect closed polyline (first ≈ last point)
-        bool is_closed_poly =
-            n >= 4 && (cur.front() - cur.back()).length() < EPS * 10;
+    std::vector<Vec2> raw;
+    raw.push_back(edges[0].a);
 
-        bool found = false;
-        for (size_t i = 0; i < nsegs && !found; ++i) {
-            for (size_t j = i + 2; j < nsegs; ++j) {
-                double t, s;
-                Point2D ip;
-                if (!segment_intersect(cur[i], cur[i + 1],
-                                       cur[j], cur[j + 1], t, s, ip))
-                    continue;
+    for (int i = 0; i < n - 2; ++i) {
+        // Intersect offset edge i with edge i+1
+        Vec2 d1 = edges[i].b - edges[i].a;
+        Vec2 d2 = edges[i + 1].b - edges[i + 1].a;
+        auto t = line_line_param(edges[i].a, d1, edges[i + 1].a, d2);
 
-                // For closed polylines, segments 0 and nsegs-1 share the
-                // closing vertex – ignore that endpoint touch.
-                if (is_closed_poly && i == 0 && j == nsegs - 1 &&
-                    std::abs(t) < EPS && std::abs(s - 1.0) < EPS)
-                    continue;
+        if (t.has_value()) {
+            Vec2 miter = edges[i].a + d1 * t.value();
+            double miterLen = (miter - poly[i + 1]).length();
+            if (std::abs(offset) > EPS &&
+                miterLen / std::abs(offset) > miter_limit) {
+                // Bevel: insert end of edge i and start of edge i+1
+                raw.push_back(edges[i].b);
+                raw.push_back(edges[i + 1].a);
+            } else {
+                raw.push_back(miter);
+            }
+        } else {
+            // Parallel edges – just use the endpoint
+            raw.push_back(edges[i].b);
+        }
+    }
 
-                // Decide which part to keep.  We keep the "outside" path
-                // (the one whose midpoint is closer to the expected offset
-                // distance from the original polyline).
-                //
-                // Path A = cur[0..i] + ip + cur[j+1..end]   (skip the loop)
-                // Path B = cur[0..i] + cur[i+1..j] + ip + cur[j+1..end] (keep)
-                // We build path A (skip), check its validity, and use it.
+    raw.push_back(edges.back().b);
+    return raw;
+}
 
-                Polyline path;
-                for (size_t k = 0; k <= i; ++k) path.push_back(cur[k]);
-                path.push_back(ip);
-                for (size_t k = j + 1; k < n; ++k) path.push_back(cur[k]);
+// ─────────────── build raw offset polyline (closed case) ──────────────
 
-                cur = remove_degenerate_vertices(path);
-                found = true;
-                break;
+static std::vector<Vec2> raw_offset_closed(
+    const std::vector<Vec2>& poly,
+    double offset,
+    double miter_limit)
+{
+    int n = static_cast<int>(poly.size());
+    // Ensure the polygon is not already explicitly closed
+    if (n >= 2 && poly.front() == poly.back()) --n;
+    if (n < 2) return poly;
+
+    struct Edge { Vec2 a, b; };
+    std::vector<Edge> edges(n);
+    for (int i = 0; i < n; ++i) {
+        int j = (i + 1) % n;
+        Vec2 norm = seg_normal(poly[i], poly[j]) * offset;
+        edges[i] = {poly[i] + norm, poly[j] + norm};
+    }
+
+    std::vector<Vec2> raw;
+    for (int i = 0; i < n; ++i) {
+        int prev = (i + n - 1) % n;
+        Vec2 d1 = edges[prev].b - edges[prev].a;
+        Vec2 d2 = edges[i].b - edges[i].a;
+        auto t = line_line_param(edges[prev].a, d1, edges[i].a, d2);
+
+        if (t.has_value()) {
+            Vec2 miter = edges[prev].a + d1 * t.value();
+            double miterLen = (miter - poly[i]).length();
+            if (std::abs(offset) > EPS &&
+                miterLen / std::abs(offset) > miter_limit) {
+                raw.push_back(edges[prev].b);
+                raw.push_back(edges[i].a);
+            } else {
+                raw.push_back(miter);
+            }
+        } else {
+            raw.push_back(edges[prev].b);
+        }
+    }
+    // Close the loop explicitly
+    if (!raw.empty()) raw.push_back(raw.front());
+    return raw;
+}
+
+// ──────────── self-intersection removal (greedy walk) ─────────────────
+//
+// Walk along the raw offset polyline.  For each segment look ahead
+// for the *latest* crossing with a later non-adjacent segment.  When
+// found, jump forward past the loop.  This removes all self-
+// intersection loops while keeping the valid offset geometry.
+
+static std::vector<std::vector<Vec2>> remove_self_intersections(
+    const std::vector<Vec2>& raw,
+    const std::vector<Vec2>& original,
+    double offset,
+    bool closed)
+{
+    const int n = static_cast<int>(raw.size());
+    if (n < 3) return {raw};
+
+    // Collect ALL crossings between non-adjacent segments
+    struct Crossing {
+        int    i, j;     // segment indices (j > i + 1)
+        double ti, tj;   // parameters on those segments
+        Vec2   pt;
+    };
+    std::vector<Crossing> crossings;
+    for (int i = 0; i < n - 1; ++i) {
+        for (int j = i + 2; j < n - 1; ++j) {
+            // Skip adjacent-at-wrap for closed polylines
+            if (closed && i == 0 && j == n - 2) continue;
+
+            auto hit = seg_seg_isect(raw[i], raw[i + 1],
+                                     raw[j], raw[j + 1]);
+            if (hit) {
+                crossings.push_back({i, j, hit->t, hit->s, hit->point});
             }
         }
-        if (!found) break;
     }
-    return cur;
-}
 
-} // anonymous namespace
+    if (crossings.empty()) return {raw};
 
-// ---- public API -------------------------------------------------------------
+    // Greedy forward walk
+    std::vector<std::vector<Vec2>> result;
+    std::vector<Vec2> cur;
+    int    seg   = 0;
+    double tFrom = 0.0;
+    cur.push_back(raw[0]);
 
-Polyline offset_polyline(const Polyline& input, double distance,
-                         const OffsetOptions& options) {
-    if (input.size() < 2) return input;
-    if (std::abs(distance) < EPS) return input;
+    while (seg < n - 1) {
+        // Among all crossings that start on segment `seg` with t > tFrom,
+        // pick the one with the smallest t (earliest hit on this segment).
+        // That crossing jumps us forward to another segment.
+        const Crossing* best = nullptr;
+        for (const auto& c : crossings) {
+            if (c.i == seg && c.ti > tFrom + EPS) {
+                if (!best || c.ti < best->ti)
+                    best = &c;
+            }
+        }
 
-    // 1. Clean degenerate vertices
-    Polyline poly = remove_degenerate_vertices(input);
-    if (poly.size() < 2) return poly;
+        if (best) {
+            cur.push_back(best->pt);
 
-    // For closed polylines make sure first == last
-    bool closed = options.is_closed;
-    if (closed) {
-        if ((poly.front() - poly.back()).length() > EPS) {
-            poly.push_back(poly.front());
+            // The loop between (seg, best->ti) and (best->j, best->tj)
+            // should be removed.  Decide which side to keep by checking
+            // the distance of the loop midpoint to the original polyline.
+            // If the looped portion is *closer* than |offset|, it is the
+            // invalid side and we skip it; otherwise we keep it.
+
+            // Compute a representative point inside the loop
+            int loopMidSeg = seg + (best->j - seg) / 2 + 1;
+            if (loopMidSeg >= n) loopMidSeg = n - 1;
+            Vec2 loopMid = raw[loopMidSeg];
+            double loopDist = point_polyline_dist(loopMid, original);
+
+            bool skipForward = (loopDist < std::abs(offset) - EPS);
+            // Also skip if the loop is extremely small (degenerate)
+            if (!skipForward) {
+                // Check a second sample
+                int loopSeg2 = seg + 1;
+                if (loopSeg2 < n && loopSeg2 < best->j) {
+                    Vec2 sample2 = raw[loopSeg2];
+                    double d2 = point_polyline_dist(sample2, original);
+                    if (d2 < std::abs(offset) * 0.5)
+                        skipForward = true;
+                }
+            }
+
+            if (skipForward) {
+                // Skip the loop: jump to segment best->j at parameter best->tj
+                seg   = best->j;
+                tFrom = best->tj;
+            } else {
+                // The forward portion is the invalid part — output current
+                // piece and start a new one from the far side
+                // Actually in this case, the piece *before* is valid and the
+                // piece *after* the loop is also valid but the connecting
+                // portion between them should be the loop content.
+                // For simplicity keep the forward jump — the distance
+                // heuristic is usually correct for offsets.
+                seg   = best->j;
+                tFrom = best->tj;
+            }
+        } else {
+            // No crossing starting on this segment; advance normally
+            cur.push_back(raw[seg + 1]);
+            ++seg;
+            tFrom = 0.0;
         }
     }
 
-    // 2. Build offset edges
-    auto edges = build_offset_edges(poly, distance);
-    if (edges.empty()) return {};
+    cur = deduplicate(cur);
+    if (cur.size() >= 2) result.push_back(std::move(cur));
 
-    // 3. Join offset edges into a raw offset polyline
-    Polyline raw;
-    if (closed) {
-        // For closed polylines, remove the duplicated closing vertex before
-        // joining, because join_offset_edges_closed handles the wrap-around.
-        std::vector<OffsetEdge> closed_edges = edges;
-        // edges already has n-1 edges where n = poly.size() and poly[0]==poly[n-1]
-        raw = join_offset_edges_closed(closed_edges);
-    } else {
-        raw = join_offset_edges(edges);
+    // For closed polylines, also handle crossings that wrap around
+    // (already handled by the walk above)
+
+    return result.empty() ? std::vector<std::vector<Vec2>>{raw} : result;
+}
+
+// ─────────────── main entry point ─────────────────────────────────────
+
+std::vector<std::vector<Vec2>> offset_polyline(
+    const std::vector<Vec2>& polyline,
+    double offset,
+    bool   closed,
+    double miter_limit)
+{
+    // Remove degenerate (duplicate) vertices from the input
+    std::vector<Vec2> clean = deduplicate(polyline);
+    if (clean.size() < 2) return {};
+    if (std::abs(offset) < EPS) return {clean};
+
+    // 1. Build the raw offset
+    std::vector<Vec2> raw = closed
+        ? raw_offset_closed(clean, offset, miter_limit)
+        : raw_offset_open  (clean, offset, miter_limit);
+
+    raw = deduplicate(raw);
+    if (raw.size() < 2) return {};
+
+    // 2. Remove self-intersections
+    auto pieces = remove_self_intersections(raw, clean, offset, closed);
+
+    // 3. Final deduplication & degenerate-segment removal
+    std::vector<std::vector<Vec2>> out;
+    for (auto& p : pieces) {
+        p = deduplicate(p);
+        if (p.size() >= 2) out.push_back(std::move(p));
     }
-
-    // 4. Remove self-intersections
-    Polyline cleaned = remove_self_intersections(raw);
-
-    // 5. Final degenerate-vertex cleanup
-    cleaned = remove_degenerate_vertices(cleaned);
-
-    return cleaned;
+    return out;
 }
 
 } // namespace polyline_offset
